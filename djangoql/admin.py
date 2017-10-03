@@ -8,6 +8,7 @@ from django.views.generic import TemplateView
 
 from .compat import text_type
 from .exceptions import DjangoQLError
+from .models import SavedQuery
 from .queryset import apply_search
 from .schema import DjangoQLSchema
 
@@ -43,10 +44,12 @@ class DjangoQLSearchMixin(object):
                 'djangoql/js/lib/lexer.js',
                 'djangoql/js/completion.js',
                 'djangoql/js/completion_admin.js',
+                'djangoql/js/save_query.js',
             ))
             media.add_css({'': (
                 'djangoql/css/completion.css',
                 'djangoql/css/completion_admin.css',
+                'djangoql/css/save_query.css',
             )})
         return media
 
@@ -69,6 +72,18 @@ class DjangoQLSearchMixin(object):
                     ),
                     name='djangoql_syntax_help',
                 ),
+                url(
+                    r'^djangoql-save-query/$',
+                    self.admin_site.admin_view(self.save_query)
+                ),
+                url(
+                    r'^djangoql-query-list/$',
+                    self.admin_site.admin_view(self.query_list)
+                ),
+                url(
+                    r'^djangoql-delete-query/$',
+                    self.admin_site.admin_view(self.delete_query)
+                ),
             ]
         return custom_urls + super(DjangoQLSearchMixin, self).get_urls()
 
@@ -78,3 +93,53 @@ class DjangoQLSearchMixin(object):
             content=json.dumps(response, indent=2),
             content_type='application/json; charset=utf-8',
         )
+
+    def _serialize_query(self, queryset):
+        return [
+            dict(id=id, name=name, text=text)
+            for id, name, text in queryset.values_list('id', 'name', 'query')
+        ]
+
+    def query_list(self, request):
+        own_queries = SavedQuery.objects.filter(user=request.user).order_by('-id')
+        public_queries = SavedQuery.objects.exclude(user=request.user).filter(is_public=True).order_by('-id')
+        response = dict(
+            own=self._serialize_query(own_queries),
+            public=self._serialize_query(public_queries),
+        )
+        return HttpResponse(
+            content=json.dumps(response, indent=2),
+            content_type='application/json; charset=utf-8',
+        )
+
+    def save_query(self, request):
+        status = 400
+        response = {}
+        if request.is_ajax():
+            query = request.GET.get('query')
+            name = request.GET.get('name')
+            is_public = request.GET.get('is_public', False) == 'true'
+            user = request.user
+            if query and name and user.is_authenticated:
+                new_query = SavedQuery.objects.create(
+                    query=query, name=name, is_public=is_public, user=request.user
+                )
+                response = dict(
+                    query_id=new_query.pk,
+                    query_text=new_query.query,
+                )
+                status = 201
+        return HttpResponse(
+            content=json.dumps(response, indent=2),
+            content_type='application/json; charset=utf-8',
+            status=status
+        )
+
+    def delete_query(self, request):
+        # using GET to avoid a mess with a csrf token
+        status = 400
+        if request.is_ajax():
+            query_id = request.GET.get('query_id')
+            count = SavedQuery.objects.filter(pk=query_id, user=request.user).delete()
+            status = 204 if count else 404
+        return HttpResponse(status=status)
